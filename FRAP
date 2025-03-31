@@ -1,0 +1,162 @@
+# Load Required Libraries
+library(ggplot2)
+library(nls2)
+
+# Set Working Directory
+setwd("C:/Users/mmani3/Desktop/FRAP")
+
+# Load Data (NO headers)
+Controldata <- read.csv("Controlwithref.csv", header = FALSE)
+Referencedata <- read.csv("Referencewithref.csv", header = FALSE)
+
+# Create Time Vector
+num_frames <- nrow(Controldata)
+time <- seq(0, (num_frames - 1) * 0.995, by = 0.995)
+
+# Normalize Data
+doubleNormalize <- function(data) {
+  num_cols <- ncol(data)
+  
+  if (num_cols %% 2 != 0) {
+    stop("Number of columns must be even (Bleach and Reference pairs).")
+  }
+  
+  num_bleach_cols <- num_cols / 2
+  normalized_data <- matrix(NA, nrow = nrow(data), ncol = num_bleach_cols)
+  
+  for (i in seq(1, num_cols, by = 2)) {
+    bleach <- data[, i]
+    reference <- data[, i + 1]
+    
+    bleach_corr <- bleach - pmax(0, mean(reference, na.rm = TRUE))
+    mean_ref <- mean(reference, na.rm = TRUE)
+    
+    if (mean_ref == 0) {
+      warning(paste("Reference mean is zero for columns", i, "and", i + 1, ". Skipping normalization for this pair."))
+      next
+    }
+    
+    norm_bleach <- bleach_corr / mean_ref
+    pre_bleach_mean <- mean(norm_bleach[1:10], na.rm = TRUE)
+    normalized_data[, (i + 1) / 2] <- norm_bleach / pre_bleach_mean
+  }
+  
+  return(normalized_data)
+}
+
+Controlnormalized <- doubleNormalize(Controldata)
+Referencenormalized <- doubleNormalize(Referencedata)
+
+# Fit Data & Compute Half-Lives (Improved)
+fitAndGetHalfLife <- function(time, data) {
+  num_rois <- ncol(data)
+  fits <- vector("list", num_rois)
+  half_lives <- rep(NA, num_rois)
+  params <- vector("list", num_rois)
+  gofs <- vector("list", num_rois)
+  
+  for (i in 1:num_rois) {
+    roi_data <- data[, i]
+    
+    # Improved Initial Parameter Guesses
+    A0 <- mean(roi_data[1:5], na.rm = TRUE)
+    tau0 <- median(diff(time[1:20]), na.rm = TRUE) * 2  # More robust tau guess
+    
+    tryCatch({
+      fit_result <- nls(roi_data ~ A * (1 - exp(-t / tau)), 
+                        data = data.frame(t = time, roi_data = roi_data),
+                        start = list(A = A0, tau = tau0),
+                        algorithm = "port",  # More robust fitting
+                        control = list(maxiter = 2000, minFactor = 1e-6, warnOnly = TRUE))
+      
+      params[[i]] <- coef(fit_result)
+      fits[[i]] <- fit_result
+      
+      # Compute Half-Life (t = ln(2) * tau)
+      half_lives[i] <- coef(fit_result)["tau"] * log(2)
+      
+      # Compute R-Squared
+      ss_residual <- sum(residuals(fit_result)^2, na.rm = TRUE)
+      ss_total <- sum((roi_data - mean(roi_data, na.rm = TRUE))^2, na.rm = TRUE)
+      gofs[[i]] <- list(rsquare = 1 - (ss_residual / ss_total))
+      
+    }, error = function(e) {
+      warning(paste("⚠️ Fit failed for ROI", i))
+      fits[[i]] <- NULL
+      params[[i]] <- NULL
+      half_lives[i] <- NA
+      gofs[[i]] <- NULL
+    })
+  }
+  
+  return(list(fits = fits, half_lives = half_lives, params = params, gofs = gofs))
+}
+
+# Run Fitting
+Controlresults <- fitAndGetHalfLife(time, Controlnormalized)
+Referenceresults <- fitAndGetHalfLife(time, Referencenormalized)
+
+Controlfits <- Controlresults$fits
+ControlhalfLives <- Controlresults$half_lives
+Controlparams <- Controlresults$params
+Controlgofs <- Controlresults$gofs
+
+Referencefits <- Referenceresults$fits
+ReferencehalfLives <- Referenceresults$half_lives
+Referenceparams <- Referenceresults$params
+Referencegofs <- Referenceresults$gofs
+
+# Display & Save Half-Life Results (Handling NULLs)
+print("Control Half-lives:")
+print(ControlhalfLives)
+write.csv(data.frame(ControlhalfLives), "Control_half_lives.csv", row.names = FALSE)
+
+print("Reference Half-lives:")
+print(ReferencehalfLives)
+write.csv(data.frame(ReferencehalfLives), "Reference_half_lives.csv", row.names = FALSE)
+
+# Display & Save R-squared Values (Handling NULLs)
+Control_R2 <- sapply(Controlgofs, function(gof) if (!is.null(gof) && !is.null(gof$rsquare)) gof$rsquare else NA)
+Reference_R2 <- sapply(Referencegofs, function(gof) if (!is.null(gof) && !is.null(gof$rsquare)) gof$rsquare else NA)
+
+print("Control R-squared values:")
+print(Control_R2)
+write.csv(data.frame(Control_R2), "Control_R_squared.csv", row.names = FALSE)
+
+print("Reference R-squared values:")
+print(Reference_R2)
+write.csv(data.frame(Reference_R2), "Reference_R_squared.csv", row.names = FALSE)
+
+# Save Fitted Parameters (Handling NULLs)
+write.csv(do.call(rbind, lapply(Controlparams, function(x) if (!is.null(x)) data.frame(t(x)) else NA)), "Control_fitted_params.csv", row.names = FALSE)
+write.csv(do.call(rbind, lapply(Referenceparams, function(x) if (!is.null(x)) data.frame(t(x)) else NA)), "Reference_fitted_params.csv", row.names = FALSE)
+
+# Compute Mean & SD for Plotting (Handling NULLs and NAs)
+mean_Control <- rowMeans(Controlnormalized, na.rm = TRUE)
+std_Control <- apply(Controlnormalized, 1, sd, na.rm = TRUE)
+
+mean_Reference <- rowMeans(Referencenormalized, na.rm = TRUE)
+std_Reference <- apply(Referencenormalized, 1, sd, na.rm = TRUE)
+
+# Convert to Data Frame for ggplot2
+plot_data <- data.frame(
+  Time = rep(time, 2),
+  Mean = c(mean_Control, mean_Reference),
+  SD = c(std_Control, std_Reference),
+  Group = rep(c("Control", "Reference"), each = length(time))
+)
+
+# Plot Mean Recovery Curves with Error Bars (Fixed)
+p <- ggplot(plot_data, aes(x = Time, y = Mean, color = Group)) +
+  geom_line(linewidth = 1.2) +  
+  geom_ribbon(aes(ymin = Mean - SD, ymax = Mean + SD, fill = Group), alpha = 0.2) +
+  labs(title = "Mean FRAP Recovery Curves", x = "Time (s)", y = "Normalized Fluorescence") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+
+print(p)
+
+# Save Plot
+ggsave("Mean_FRAP_Recovery.png", p, width = 10, height = 6, units = "in", dpi = 300)
+
+print("Processing complete!")
