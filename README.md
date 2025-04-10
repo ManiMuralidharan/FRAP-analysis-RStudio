@@ -1,3 +1,6 @@
+# FRAP-analysis
+# Author : Muralidharan Mani
+# Affiliation : University of Wisconsin-Madison
 This R code performs a comprehensive analysis of FRAP (Fluorescence Recovery After Photobleaching) data, including data normalization, curve fitting, half-life calculation, R-squared computation, and plotting. Here's a detailed breakdown:
 
 1. Load Required Libraries:
